@@ -1,0 +1,84 @@
+plugins {
+	id 'fabric-loom' version "${loom_version}"
+}
+
+base {
+	archivesName = project.archives_base_name
+}
+
+version = "MC-${project.minecraft_version}-${project.mod_version}"
+group = project.maven_group
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+// 1.21.x modules build from layered sources. A layer is a folder in the repository root with
+// optional java/ and resources/ subfolders; gradle.properties lists this module's layers
+// (source_layers), newest first. A file in an earlier layer replaces the file with the same path
+// in every later layer. This module's own src/main is the top layer, shared/ is the bottom one.
+def repoDir = rootProject.projectDir.parentFile
+def layers = providers.gradleProperty('source_layers').get().split(',').collect { new File(repoDir, it.trim()) }
+
+// Classes in shared/ that are unused and only compile against 1.20.x.
+def legacyOnlySources = [
+	'ru/paulevs/bismuthlib/GPULightPropagator.java',
+	'ru/paulevs/bismuthlib/data/BlockStorage.java',
+	'ru/paulevs/bismuthlib/data/AdvancedBlockStorage.java'
+]
+
+def mergeJava = tasks.register('mergeJavaLayers', Sync) {
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from 'src/main/java'
+	layers.each { from new File(it, 'java') }
+	from(new File(repoDir, 'shared/java')) { exclude legacyOnlySources }
+	into layout.buildDirectory.dir('layered/java')
+}
+
+def mergeResources = tasks.register('mergeResourceLayers', Sync) {
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from 'src/main/resources'
+	layers.each { from new File(it, 'resources') }
+	// shared/ holds the 1.20.x terrain shaders; each 1.21.x layer ships its own.
+	from(new File(repoDir, 'shared/resources')) { exclude 'assets/minecraft/shaders/core/**' }
+	into layout.buildDirectory.dir('layered/resources')
+}
+
+sourceSets {
+	main {
+		java.srcDirs = [mergeJava]
+		resources.srcDirs = [mergeResources]
+	}
+}
+
+processResources {
+	def modVersion = project.version
+	inputs.property "version", modVersion
+	filesMatching("fabric.mod.json") {
+		expand "version": modVersion
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+	withSourcesJar()
+}
+
+jar {
+	def baseName = project.archives_base_name
+	from(new File(repoDir, 'LICENSE')) {
+		rename { "${it}_${baseName}" }
+	}
+}

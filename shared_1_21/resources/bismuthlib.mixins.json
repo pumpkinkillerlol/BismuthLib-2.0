@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "ru.paulevs.bismuthlib.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"TextureAtlasSpriteAccessor",
+		"LevelRendererMixin",
+		"MinecraftMixin",
+		"OptionsScreenMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

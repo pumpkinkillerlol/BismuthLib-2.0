@@ -3,12 +3,15 @@ package ru.paulevs.bismuthlib.data;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.BlockPos.MutableBlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.paulevs.bismuthlib.LightPropagator;
+import ru.paulevs.bismuthlib.compat.ColoredLightTexture;
+import ru.paulevs.bismuthlib.compat.VersionCompat;
 import ru.paulevs.bismuthlib.gui.CFOptions;
 
 import java.util.ArrayList;
@@ -46,6 +49,7 @@ public class LevelShaderData {
 	private final long[] cellSequences;
 	private final int[] slotOwners;
 	private final LightAtlas atlas;
+	private final MutableBlockPos center = new MutableBlockPos();
 
 	private final Set<Long> queued = ConcurrentHashMap.newKeySet();
 	private final ConcurrentLinkedQueue<SectionResult> results = new ConcurrentLinkedQueue<>();
@@ -106,11 +110,24 @@ public class LevelShaderData {
 		atlas.close();
 	}
 
-	public int getTextureId() {
-		return atlas.getTextureId();
+	/**
+	 * Light texture for the terrain shaders. It is replaced when the atlas grows, so get it again every frame.
+	 */
+	public ColoredLightTexture getTexture() {
+		return atlas.getTexture();
 	}
 
+	/**
+	 * Texel row where atlas slots start, shaders receive it in the dataSide uniform.
+	 */
 	public int getSlotBase() {
+		return atlas.getSlotBase();
+	}
+
+	/**
+	 * Same as {@link #getSlotBase()}, named after the dataSide uniform used by the 1.21.x render layers.
+	 */
+	public int getDataSide() {
 		return atlas.getSlotBase();
 	}
 
@@ -124,6 +141,13 @@ public class LevelShaderData {
 
 	public int getThreadCount() {
 		return threads.length;
+	}
+
+	/**
+	 * Section position of the map center (render thread only).
+	 */
+	public BlockPos getCenter() {
+		return center;
 	}
 
 	public int getCenterX() {
@@ -192,8 +216,8 @@ public class LevelShaderData {
 	public void resetAll() {
 		Level level = this.level;
 		if (level == null || !hasCenter) return;
-		int minSection = level.getMinSection();
-		int maxSection = level.getMaxSection();
+		int minSection = VersionCompat.getMinSection(level);
+		int maxSection = VersionCompat.getMaxSection(level);
 		for (int i = 0; i < dataWidth; i++) {
 			int px = centerX - halfWidth + i;
 			for (int k = 0; k < dataHeight; k++) {
@@ -209,7 +233,7 @@ public class LevelShaderData {
 	public void markSection(int x, int y, int z) {
 		Level level = this.level;
 		if (level == null || !hasCenter || !isInRange(x, y, z)) return;
-		if (y < level.getMinSection() || y >= level.getMaxSection()) return;
+		if (y < VersionCompat.getMinSection(level) || y >= VersionCompat.getMaxSection(level)) return;
 		enqueue(x, y, z);
 	}
 
@@ -248,9 +272,9 @@ public class LevelShaderData {
 		Level level = this.level;
 		if (level == null || !hasCenter) return;
 
-		int minSection = level.getMinSection();
+		int minSection = VersionCompat.getMinSection(level);
 		int y1 = Math.max(centerY - halfHeight, minSection);
-		int y2 = Math.min(centerY + halfHeight, level.getMaxSection() - 1);
+		int y2 = Math.min(centerY + halfHeight, VersionCompat.getMaxSection(level) - 1);
 
 		for (int y = y1; y <= y2; y++) {
 			markSection(chunkX, y, chunkZ);
@@ -285,11 +309,12 @@ public class LevelShaderData {
 		centerX = cx;
 		centerY = cy;
 		centerZ = cz;
+		center.set(cx, cy, cz);
 		hasCenter = true;
 		evictionFailDistance = Integer.MAX_VALUE;
 
-		int minSection = level.getMinSection();
-		int maxSection = level.getMaxSection();
+		int minSection = VersionCompat.getMinSection(level);
+		int maxSection = VersionCompat.getMaxSection(level);
 
 		for (int i = 0; i < dataWidth; i++) {
 			int px = cx - halfWidth + i;

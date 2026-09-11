@@ -11,6 +11,7 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.material.FluidState;
 import org.jetbrains.annotations.Nullable;
+import ru.paulevs.bismuthlib.compat.VersionCompat;
 
 /**
  * Read-only view of the 48x48x48 block window (3x3x3 sections) around a section.
@@ -38,7 +39,7 @@ public class SimpleBlockStorage implements BlockGetter {
 		minBuildHeight = level.getMinBuildHeight();
 		height = level.getHeight();
 
-		int minSection = level.getMinSection();
+		int minSection = VersionCompat.getMinSection(level);
 		ChunkSource source = level.getChunkSource();
 		boolean centerLoaded = false;
 
