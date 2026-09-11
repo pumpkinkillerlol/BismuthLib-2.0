@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"id": "bismuthlib",
+	"version": "${version}",
+
+	"name": "BismuthLib 2.0",
+	"description": "Fast colored lights with a 32 chunk range. BismuthLib 2.0 is based on BismuthLib by paulevs.",
+	"authors": [
+		"paulevs"
+	],
+	"contributors": [
+		"pumpkinkillerlol",
+		"Claude Opus 5 (AI by Anthropic)"
+	],
+	"contact": {
+		"homepage": "https://github.com/pumpkinkillerlol/BismuthLib-2.0",
+		"sources": "https://github.com/pumpkinkillerlol/BismuthLib-2.0",
+		"issues": "https://github.com/pumpkinkillerlol/BismuthLib-2.0/issues"
+	},
+
+	"license": "MIT",
+	"icon": "assets/bismuthlib/icon.png",
+
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"ru.paulevs.bismuthlib.BismuthLibClient"
+		]
+	},
+	"mixins": [
+		"bismuthlib.mixins.json"
+	],
+
+	"depends": {
+		"fabricloader": ">=0.15.11",
+		"fabric": "*",
+		"minecraft": "1.21.9",
+		"java": ">=21"
+	}
+}

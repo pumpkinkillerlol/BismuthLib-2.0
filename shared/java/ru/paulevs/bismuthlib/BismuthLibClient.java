@@ -369,7 +369,7 @@ public class BismuthLibClient implements ClientModInitializer {
 	}
 
 	public static void bindWithUniforms() {
-		int textureId = data.getTextureId();
+		int textureId = data.getTexture().getId();
 		RenderSystem.setShaderTexture(7, textureId);
 		ShaderInstance shader = RenderSystem.getShader();
 		// Samplers are copied from RenderSystem before this point, set it directly so a regrown light texture is used immediately

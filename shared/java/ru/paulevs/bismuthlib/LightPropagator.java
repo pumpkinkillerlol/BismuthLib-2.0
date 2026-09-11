@@ -9,6 +9,7 @@ import net.minecraft.core.Vec3i;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import ru.paulevs.bismuthlib.compat.VersionCompat;
 import ru.paulevs.bismuthlib.data.BlockLights;
 import ru.paulevs.bismuthlib.data.SimpleBlockStorage;
 import ru.paulevs.bismuthlib.data.info.LightInfo;
@@ -322,7 +323,7 @@ public class LightPropagator {
 			if (BlockLights.getLight(state) != null) flags |= FLAG_SOURCE;
 			if (modify && BlockLights.getTransformer(state) != null) flags |= FLAG_TRANSFORMER;
 			pos.set(storage.getOriginX() + x, storage.getOriginY() + y, storage.getOriginZ() + z);
-			if (state.isSolidRender(storage, pos) || !state.propagatesSkylightDown(storage, pos)) {
+			if (VersionCompat.blocksLight(state, storage, pos)) {
 				if (isAxisSturdy(state, Direction.EAST)) flags |= FLAG_BLOCK_X;
 				if (isAxisSturdy(state, Direction.UP)) flags |= FLAG_BLOCK_Y;
 				if (isAxisSturdy(state, Direction.SOUTH)) flags |= FLAG_BLOCK_Z;

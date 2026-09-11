@@ -1,5 +1,5 @@
 # BismuthLib 2.0
-Fast colored lights for Fabric, Minecraft **1.20 - 1.20.6**.
+Fast colored lights for Fabric, Minecraft **1.20 - 1.21.11**.
 
 BismuthLib 2.0 is an updated version of [BismuthLib](https://github.com/paulevsGitch/BismuthLib) by **paulevs**.
 Colored light now loads almost instantly, reaches **32 chunks** and handles huge amounts of light sources
@@ -15,7 +15,7 @@ like lava lakes and nether lava oceans.
 ## Credits
 - **paulevs** - creator of the original [BismuthLib](https://github.com/paulevsGitch/BismuthLib) mod.
 All credit for the original idea, colored light design, shaders and resource pack format goes to them.
-- **pumpkinkillerlol** - port to Minecraft 1.20 - 1.20.6 and owner of this repository.
+- **pumpkinkillerlol** - port to Minecraft 1.20 - 1.21.11 and owner of this repository.
 - **Claude Opus 5** (AI model by Anthropic) - edited and updated the mod for 2.0: new light engine, 32 chunk support,
 performance improvements, in-game testing and this README.
 
@@ -28,6 +28,8 @@ performance improvements, in-game testing and this README.
 The old dense texture would need about 1 GB at 32 chunks, so it was limited to 16.
 - **Huge amounts of lights** - lights with the same color and radius are spread together in one pass,
 so a lava lake costs about as much as a single torch. Sections with no light sources nearby are skipped almost for free.
+- **Minecraft 1.21 - 1.21.11** - the same light engine runs on every 1.21 release, including the new graphics API
+used since 1.21.5.
 - **Better defaults** - XZ radius goes up to 32 (old configs are moved to 32 automatically), Y radius defaults to 3,
 worker threads default to your CPU cores minus 2.
 - **Fixes** - removed a Mod Menu entrypoint in 1.20.3 that pointed to a missing class, and fixed the light texture
@@ -63,7 +65,7 @@ After flying across the lava at 40 blocks/s (left: 2.0, right: original):
 <img src="docs/images/lava_original_flight.jpg" width="49%" alt="Original BismuthLib after flight, dark band ahead"/>
 </p>
 
-**BismuthLib 2.0 on every Minecraft version (same test):**
+**BismuthLib 2.0 on every 1.20 version (same test):**
 
 | Minecraft | All 7170 lava sections lit | FPS standing still | Lowest FPS flying at 40 blocks/s | GPU memory for light | OpenGL errors |
 |---|---|---|---|---|---|
@@ -91,13 +93,39 @@ blue, purple, magenta). Every version shows the same colors with no bleeding bet
 
 The white square in some 1.20.5 and 1.20.6 screenshots is a debug overlay that is drawn only in the development environment.
 
+### Minecraft 1.21 - 1.21.11
+Same lava stress test on every 1.21 version (the world is the 1.20.1 lava world, upgraded by each version), followed by
+the white room color test.
+
+| Minecraft | All lava sections lit | FPS standing still | Lowest FPS flying at 40 blocks/s | GPU memory for light | OpenGL errors |
+|---|---|---|---|---|---|
+| 1.21    | 5.0 s  | 499-562  | 489 | 129 MB | 0 |
+| 1.21.1  | 5.0 s  | 347-480  | 328 | 129 MB | 0 |
+| 1.21.2  | 5.0 s  | 916-992  | 812 | 129 MB | 0 |
+| 1.21.3  | 5.0 s  | 878-1003 | 838 | 129 MB | 0 |
+| 1.21.4  | 5.0 s  | 836-976  | 680 | 129 MB | 0 |
+| 1.21.5  | 5.0 s  | 532-773  | 443 | 129 MB | 0 |
+| 1.21.6  | 5.9 s  | 605-717  | 592 | 129 MB | 0 |
+| 1.21.7  | 6.0 s  | 654-723  | 602 | 129 MB | 0 |
+| 1.21.8  | 6.0 s  | 624-721  | 616 | 129 MB | 0 |
+| 1.21.9  | 11.0 s | 648-981  | 798 | 129 MB | 0 |
+| 1.21.10 | 11.0 s | 728-983  | 672 | 129 MB | 0 |
+| 1.21.11 | 11.0 s | 592-964  | 768 | 129 MB | 0 |
+
+1.21.9 - 1.21.11 send chunks to the client more slowly, light kept up with them (the light queue stayed near zero).
+Since 1.21.2 Minecraft lowers FPS to about 30 after a while without input ("Inactivity FPS limit" option), so the
+automated test set it to "minimized".
+
+![Lava and color tests on every 1.21 version](docs/images/test_1_21_all_versions.jpg)
+
 <br/>
 
 ## Installing
 1. Install [Fabric Loader](https://fabricmc.net/use/) and [Fabric API](https://modrinth.com/mod/fabric-api) for your Minecraft version.
 2. Put the BismuthLib 2.0 jar for your Minecraft version into your `mods` folder.
 
-Java 17 is needed for 1.20 - 1.20.4 and Java 21 for 1.20.5 - 1.20.6.
+Every Minecraft version has its own jar (`bismuth-lib-MC-<minecraft version>-2.0.1.jar`), and a jar only loads on the
+Minecraft version it was built for. Java 17 is needed for 1.20 - 1.20.4 and Java 21 for 1.20.5 - 1.21.11.
 Only tested with vanilla rendering (without Sodium, Iris or OptiFine).
 
 <br/>
@@ -240,10 +268,37 @@ States light:
 
 ## Building
 ```
-.\build-all.ps1        # Windows
-bash build-all.sh      # Linux / macOS
+.\build-all.ps1 [17|21|1.21|all]     # Windows
+bash build-all.sh [17|21|1.21|all]   # Linux / macOS
 ```
-Jars are created in `v1_20_x/build/libs`. Java 21 can build every version.
+A single version can be built with its own wrapper, for example `v1_21_4/gradlew -p v1_21_4 build`.
+Jars are written to `<module>/build/libs`. Java 21 can build every version.
+
+| Minecraft       | Java | Modules                 |
+|-----------------|------|-------------------------|
+| 1.20 - 1.20.4   | 17   | `v1_20_0` - `v1_20_4`   |
+| 1.20.5 - 1.20.6 | 21   | `v1_20_5` - `v1_20_6`   |
+| 1.21 - 1.21.11  | 21   | `v1_21_0` - `v1_21_11`  |
+
+### 1.21.x source layers
+Minecraft's rendering code changed several times during 1.21.x, so the 1.21 modules don't compile
+`shared/` directly. Each module lists source layers in its `gradle.properties` (`source_layers`,
+newest first), and the build merges this module's `src/main`, then every listed layer, then `shared/`.
+A file in an earlier layer replaces the file with the same path in every later one.
+
+| Layer            | Used by      | Contents                                                                                        |
+|------------------|--------------|-------------------------------------------------------------------------------------------------|
+| `shared`         | all versions | Light engine (propagation, sparse light atlas, options, JSON loading), OpenGL `ColoredLightTexture` |
+| `shared_1_21`    | 1.21+        | `VersionCompat`, client entrypoint, mixins, shaders                                             |
+| `shared_1_21_2`  | 1.21.2+      | `CompiledShaderProgram`, terrain shader with an `ALPHA_CUTOUT` define, `getMinY` block storage  |
+| `shared_1_21_5`  | 1.21.5+      | Render pipelines, GPU device `ColoredLightTexture`                                              |
+| `shared_1_21_6`  | 1.21.6+      | `ChunkSectionsToRender`, `BismuthLight` uniform buffer, texture views                           |
+| `shared_1_21_9`  | 1.21.9+      | Terrain shader lightmap sampling, byte buffer texture uploads                                   |
+| `shared_1_21_11` | 1.21.11      | `Identifier`, GPU samplers and the `ChunkSection` terrain shader                                |
+
+To change something for every version, edit the file in `shared/`. To change something for every 1.21.x version,
+edit the file in the oldest layer that contains it. To change a single Minecraft release, put a copy of the file
+into that module's `src/main`.
 
 <br/>
 
