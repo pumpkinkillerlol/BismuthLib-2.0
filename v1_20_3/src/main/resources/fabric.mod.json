@@ -21,9 +21,6 @@
 	"entrypoints": {
 		"client": [
 			"ru.paulevs.bismuthlib.BismuthLibClient"
-		],
-		"modmenu": [
-			"ru.paulevs.bismuthlib.gui.ModMenuIntegration"
 		]
 	},
 	"mixins": [

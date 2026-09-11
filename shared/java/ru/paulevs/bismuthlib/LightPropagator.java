@@ -1,289 +1,359 @@
 package ru.paulevs.bismuthlib;
 
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.BlockPos.MutableBlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
-import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import ru.paulevs.bismuthlib.data.BlockLights;
 import ru.paulevs.bismuthlib.data.SimpleBlockStorage;
 import ru.paulevs.bismuthlib.data.info.LightInfo;
-import ru.paulevs.bismuthlib.data.info.SimpleLight;
 import ru.paulevs.bismuthlib.data.transformer.LightTransformer;
-import ru.paulevs.bismuthlib.gui.CFOptions;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
+/**
+ * Computes colored light for one 16x16x16 section. One instance per worker thread.
+ * <p>
+ * Advanced light is a breadth-first flood fill inside the 48x48x48 window around the section.
+ * Lights with the same color and radius have identical falloff, so they are grouped and flooded
+ * together as one multi-source fill (a lava lake is one fill instead of thousands). This gives the
+ * same result as flooding each light on its own and max-blending the colors.
+ */
 public class LightPropagator {
-	private static final Direction[] DIRECTIONS = Direction.values();
-	private static final byte MASK_OFFSET = 17;
-	private static final BlockPos[] OFFSETS;
+	private static final int SIZE = SimpleBlockStorage.SIZE;
+	private static final int VOLUME = SIZE * SIZE * SIZE;
+	private static final int STEP_X = SIZE * SIZE;
+	private static final int STEP_Y = SIZE;
+	private static final int MAX_RADIUS = 255;
+	private static final int MAX_CACHED_GROUPS = 1024;
+
+	private static final byte FLAG_SOURCE = 1;
+	private static final byte FLAG_TRANSFORMER = 2;
+	private static final byte FLAG_BLOCK_X = 4;
+	private static final byte FLAG_BLOCK_Y = 8;
+	private static final byte FLAG_BLOCK_Z = 16;
+
+	// Distance along one axis from a window coordinate to the target section (window coordinates 16-31)
+	private static final int[] BOX_DISTANCE = new int[SIZE];
 	private static final int[] OFFSET_BORDER_DELTAS;
-	
-	private final List<Set<BlockPos>> buffers = new ArrayList<>(2);
-	private final MutableBlockPos[] positions = new MutableBlockPos[35937];
-	private final Set<TransformerInfo> transformers = new HashSet<>();
-	private final int[] mask = new int[35937];
-	private int maskGeneration = 0;
-	private SimpleBlockStorage storage = new SimpleBlockStorage();
-	MutableBlockPos pos = new MutableBlockPos();
-	
-	public LightPropagator() {
-		buffers.add(new HashSet<>());
-		buffers.add(new HashSet<>());
-		for (int i = 0; i < positions.length; i++) {
-			positions[i] = new MutableBlockPos();
+
+	private final SimpleBlockStorage storage = new SimpleBlockStorage();
+	private final MutableBlockPos pos = new MutableBlockPos();
+	private final boolean[] lightSections = new boolean[27];
+	private final LightInfo[] border = new LightInfo[5832];
+
+	private final byte[] flagCache = new byte[VOLUME];
+	private final int[] flagStamps = new int[VOLUME];
+	private int flagStamp;
+
+	private final int[] visited = new int[VOLUME];
+	private int visitStamp;
+	private int[] frontier = new int[VOLUME];
+	private int[] nextFrontier = new int[VOLUME];
+	private int nextCount;
+
+	private final Long2ObjectOpenHashMap<LightGroup> primaryCache = new Long2ObjectOpenHashMap<>();
+	private final Long2ObjectOpenHashMap<LightGroup> secondaryCache = new Long2ObjectOpenHashMap<>();
+	private final List<LightGroup> primaryGroups = new ArrayList<>();
+	private final List<LightGroup> secondaryGroups = new ArrayList<>();
+	private final int[] values = new int[MAX_RADIUS];
+	private int computeId;
+
+	// State of the group that is currently flooded
+	private boolean modify;
+	private int radius;
+	private int step;
+	private int stepValue;
+
+	/**
+	 * Compute light of a section.
+	 * @param data output, 4096 colors indexed as x << 8 | y << 4 | z
+	 * @return true if any block in the section has light, data content is undefined otherwise
+	 */
+	public boolean compute(Level level, int secX, int secY, int secZ, int[] data, boolean fast, boolean modify) {
+		if (!storage.load(level, secX, secY, secZ)) return false;
+
+		// Palette check is very cheap and rejects most sections (no light sources nearby)
+		boolean hasLights = false;
+		for (int i = 0; i < 27; i++) {
+			LevelChunkSection section = storage.getSection(i);
+			boolean lit = section != null && section.maybeHas(BlockLights::hasLight);
+			lightSections[i] = lit;
+			hasLights |= lit;
 		}
+		if (!hasLights) return false;
+
+		Arrays.fill(data, ColorMath.ALPHA);
+		if (fast) fastLight(level, data);
+		else advancedLight(level, data, modify);
+
+		for (int value : data) {
+			if ((value & 0x00FFFFFF) != 0) return true;
+		}
+		return false;
 	}
-	
-	public void fastLight(Level level, BlockPos sectionPos, int[] data) {
-		if (sectionPos.getY() < level.getMinSection() || sectionPos.getY() > level.getMaxSection()) return;
-		LevelChunk chunk = level.getChunk(sectionPos.getX(), sectionPos.getZ());
-		if (chunk.getPos().x != sectionPos.getX() || chunk.getPos().z != sectionPos.getZ()) return;
-		int sectionIndex = sectionPos.getY() - level.getMinSection();
-		if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) return;
-		LevelChunkSection section = chunk.getSection(sectionIndex);
-		if (section == null) return;
-		
-		int sx = sectionPos.getX() << 4;
-		int sy = sectionPos.getY() << 4;
-		int sz = sectionPos.getZ() << 4;
-		
-		MutableBlockPos bp = positions[0];
-		BlockState[] border = new BlockState[5832];
-		int bi = 0;
-		for (int dx = -1; dx < 17; dx++) {
-			int wx = sx + dx;
-			bp.setX(wx);
-			for (int dy = -1; dy < 17; dy++) {
-				int wy = sy + dy;
-				bp.setY(wy);
-				for (int dz = -1; dz < 17; dz++) {
-					bp.setZ(sz + dz);
-					border[bi++] = level.getBlockState(bp);
+
+	private void fastLight(Level level, int[] data) {
+		boolean hasLights = false;
+		int borderIndex = 0;
+		for (int x = 15; x < 33; x++) {
+			for (int y = 15; y < 33; y++) {
+				for (int z = 15; z < 33; z++) {
+					LightInfo light = BlockLights.getLight(storage.getState(x, y, z));
+					border[borderIndex++] = light;
+					hasLights |= light != null;
 				}
 			}
 		}
-		
-		MutableBlockPos pos = positions[1];
-		
-		for (byte x = 0; x < 16; x++) {
-			int wx = sx | x;
-			int borderXBase = (x + 1) * 324;
-			pos.setX(wx);
-			for (byte y = 0; y < 16; y++) {
-				int wy = sy | y;
-				int borderXYBase = borderXBase + (y + 1) * 18;
-				pos.setY(wy);
-				for (byte z = 0; z < 16; z++) {
-					int wz = sz | z;
-					int borderBase = borderXYBase + z + 1;
-					pos.setZ(wz);
-					
+		if (!hasLights) return;
+
+		int originX = storage.getOriginX() + 16;
+		int originY = storage.getOriginY() + 16;
+		int originZ = storage.getOriginZ() + 16;
+
+		for (int x = 0; x < 16; x++) {
+			pos.setX(originX + x);
+			int borderX = (x + 1) * 324;
+			for (int y = 0; y < 16; y++) {
+				pos.setY(originY + y);
+				int borderXY = borderX + (y + 1) * 18;
+				for (int z = 0; z < 16; z++) {
+					pos.setZ(originZ + z);
+					borderIndex = borderXY + z + 1;
 					int index = x << 8 | y << 4 | z;
-					data[index] = ColorMath.ALPHA;
-					
-					BlockState state = section.getBlockState(x, y, z);
-					LightInfo light = BlockLights.getLight(state);
-					
+
+					LightInfo light = border[borderIndex];
 					if (light != null) {
 						data[index] = light.getSimple(level, pos, (byte) 0) | ColorMath.ALPHA;
 						continue;
 					}
-					
-					if (state.useShapeForLightOcclusion()) {
-						if (state.isCollisionShapeFullBlock(level, pos)) {
-							continue;
-						}
+
+					BlockState state = storage.getState(x + 16, y + 16, z + 16);
+					if (state.useShapeForLightOcclusion() && state.isCollisionShapeFullBlock(storage, pos)) {
+						continue;
 					}
-					
-					for (byte i = 0; i < 27; i++) {
-						state = border[borderBase + OFFSET_BORDER_DELTAS[i]];
-						light = BlockLights.getLight(state);
+
+					int color = 0;
+					for (byte i = 1; i < 27; i++) {
+						light = border[borderIndex + OFFSET_BORDER_DELTAS[i]];
 						if (light != null) {
-							data[index] = ColorMath.maxBlend(data[index], light.getSimple(level, pos, i)) | ColorMath.ALPHA;
+							color = ColorMath.maxBlend(color, light.getSimple(level, pos, i));
 						}
 					}
+					data[index] = color | ColorMath.ALPHA;
 				}
 			}
 		}
 	}
-	
-	public void advancedLight(Level level, BlockPos sectionPos, int[] data) {
-		if (sectionPos.getY() < level.getMinSection() || sectionPos.getY() > level.getMaxSection()) return;
-		LevelChunk chunk = level.getChunk(sectionPos.getX(), sectionPos.getZ());
-		if (chunk.getPos().x != sectionPos.getX() || chunk.getPos().z != sectionPos.getZ()) return;
-		int sectionIndex = sectionPos.getY() - level.getMinSection();
-		if (sectionIndex < 0 || sectionIndex >= chunk.getSections().length) return;
-		LevelChunkSection section = chunk.getSection(sectionIndex);
-		if (section == null) return;
-		
-		BlockPos secMin = new BlockPos(
-			sectionPos.getX() << 4,
-			sectionPos.getY() << 4,
-			sectionPos.getZ() << 4
-		);
-		BlockPos secMax = secMin.offset(16, 16, 16);
-		
-		int x1 = secMin.getX() - 16;
-		int y1 = secMin.getY() - 16;
-		int z1 = secMin.getZ() - 16;
-		int x2 = x1 + 48;
-		int y2 = y1 + 48;
-		int z2 = z1 + 48;
-		
-		Arrays.fill(data, ColorMath.ALPHA);
-		storage.fillFromSections(level, sectionPos.getX(), sectionPos.getY(), sectionPos.getZ());
-		
-		for (int x = x1; x < x2; x++) {
-			pos.setX(x);
-			for (int y = y1; y < y2; y++) {
-				pos.setY(y);
-				for (int z = z1; z < z2; z++) {
-					pos.setZ(z);
-					BlockState state = storage.getBlockState(pos);
-					LightInfo light = BlockLights.getLight(state);
-					if (light != null && canAffect(pos, light.getRadius(), secMin, secMax)) {
-						//fastFillLight(data, pos, light, secMin, secMax);
-						fillLight(level, data, pos, light, secMin, secMax, CFOptions.modifyColor());
+
+	private void advancedLight(Level level, int[] data, boolean modify) {
+		this.modify = modify;
+		if (++flagStamp == Integer.MAX_VALUE) {
+			Arrays.fill(flagStamps, 0);
+			flagStamp = 1;
+		}
+		if (++computeId == Integer.MAX_VALUE) {
+			primaryCache.clear();
+			secondaryCache.clear();
+			computeId = 1;
+		}
+		primaryGroups.clear();
+		secondaryGroups.clear();
+
+		int originX = storage.getOriginX();
+		int originY = storage.getOriginY();
+		int originZ = storage.getOriginZ();
+
+		for (int i = 0; i < 27; i++) {
+			if (!lightSections[i]) continue;
+			LevelChunkSection section = storage.getSection(i);
+			int baseX = (i / 9) << 4;
+			int baseY = ((i / 3) % 3) << 4;
+			int baseZ = (i % 3) << 4;
+			for (int lx = 0; lx < 16; lx++) {
+				int wx = baseX + lx;
+				for (int ly = 0; ly < 16; ly++) {
+					int wy = baseY + ly;
+					int distanceXY = BOX_DISTANCE[wx] + BOX_DISTANCE[wy];
+					for (int lz = 0; lz < 16; lz++) {
+						LightInfo light = BlockLights.getLight(section.getBlockState(lx, ly, lz));
+						if (light == null) continue;
+						int wz = baseZ + lz;
+						int lightRadius = Math.min(light.getRadius(), MAX_RADIUS);
+						// Light can't reach the section
+						if (distanceXY + BOX_DISTANCE[wz] >= lightRadius) continue;
+						pos.set(originX + wx, originY + wy, originZ + wz);
+						int color = light.getAdvanced(level, pos, (byte) 0);
+						addSeed(primaryCache, primaryGroups, lightRadius, color, (wx * SIZE + wy) * SIZE + wz);
 					}
 				}
 			}
 		}
-		
-		transformers.forEach(info -> fillLight(level, data, info.pos, info.light, secMin, secMax, false));
-		transformers.clear();
+
+		for (int i = 0; i < primaryGroups.size(); i++) {
+			propagate(level, data, primaryGroups.get(i), modify);
+		}
+
+		// Lights re-emitted by transformers (colored glass, etc.)
+		for (int i = 0; i < secondaryGroups.size(); i++) {
+			propagate(level, data, secondaryGroups.get(i), false);
+		}
 	}
-	
-	private boolean canAffect(BlockPos lightPos, int radius, BlockPos secMin, BlockPos secMax) {
-		if (lightPos.getX() + radius < secMin.getX() || lightPos.getX() - radius > secMax.getX()) return false;
-		if (lightPos.getY() + radius < secMin.getY() || lightPos.getY() - radius > secMax.getY()) return false;
-		if (lightPos.getZ() + radius < secMin.getZ() || lightPos.getZ() - radius > secMax.getZ()) return false;
-		return true;
+
+	private void addSeed(Long2ObjectOpenHashMap<LightGroup> cache, List<LightGroup> active, int radius, int color, int index) {
+		long key = (long) radius << 32 | (color & 0xFFFFFFFFL);
+		LightGroup group = cache.get(key);
+		if (group == null) {
+			if (cache.size() >= MAX_CACHED_GROUPS) cache.clear();
+			group = new LightGroup(radius, color);
+			cache.put(key, group);
+		}
+		if (group.computeId != computeId) {
+			group.computeId = computeId;
+			group.seeds.clear();
+			active.add(group);
+		}
+		group.seeds.add(index);
 	}
-	
-	private void fastFillLight(Level level, int[] data, BlockPos pos, LightInfo info, BlockPos secMin, BlockPos secMax) {
-		int radius = info.getRadius();
-		MutableBlockPos p = positions[0];
-		for (int i = -radius; i <= radius; i++) {
-			p.setX(pos.getX() + i);
-			for (int j = -radius; j <= radius; j++) {
-				p.setY(pos.getY() + j);
-				for (int k = -radius; k <= radius; k++) {
-					p.setZ(pos.getZ() + k);
-					int dist = Math.abs(i) + Math.abs(j) + Math.abs(k);
-					if (dist >= radius) continue;
-					setLight(data, p, info.getAdvanced(level, pos, (byte) dist), secMin, secMax, true);
-				}
+
+	private void propagate(Level level, int[] data, LightGroup group, boolean spawn) {
+		radius = group.radius;
+		values[0] = group.color;
+		for (int i = 1; i < radius; i++) {
+			values[i] = ColorMath.multiply(group.color, 1.0F - (float) i / radius);
+		}
+
+		if (++visitStamp == Integer.MAX_VALUE) {
+			Arrays.fill(visited, 0);
+			visitStamp = 1;
+		}
+
+		int count = 0;
+		IntArrayList seeds = group.seeds;
+		for (int i = 0; i < seeds.size(); i++) {
+			int index = seeds.getInt(i);
+			if (visited[index] == visitStamp) continue;
+			visited[index] = visitStamp;
+			write(data, index, values[0]);
+			frontier[count++] = index;
+		}
+
+		for (step = 1; step < radius && count > 0; step++) {
+			stepValue = values[step];
+			nextCount = 0;
+			for (int i = 0; i < count; i++) {
+				int index = frontier[i];
+				int x = index / STEP_X;
+				int y = (index / STEP_Y) % SIZE;
+				int z = index % SIZE;
+				int dx = BOX_DISTANCE[x];
+				int dy = BOX_DISTANCE[y];
+				int dz = BOX_DISTANCE[z];
+				if (x > 0) visit(level, data, index - STEP_X, BOX_DISTANCE[x - 1] + dy + dz, FLAG_BLOCK_X, spawn);
+				if (x < SIZE - 1) visit(level, data, index + STEP_X, BOX_DISTANCE[x + 1] + dy + dz, FLAG_BLOCK_X, spawn);
+				if (y > 0) visit(level, data, index - STEP_Y, dx + BOX_DISTANCE[y - 1] + dz, FLAG_BLOCK_Y, spawn);
+				if (y < SIZE - 1) visit(level, data, index + STEP_Y, dx + BOX_DISTANCE[y + 1] + dz, FLAG_BLOCK_Y, spawn);
+				if (z > 0) visit(level, data, index - 1, dx + dy + BOX_DISTANCE[z - 1], FLAG_BLOCK_Z, spawn);
+				if (z < SIZE - 1) visit(level, data, index + 1, dx + dy + BOX_DISTANCE[z + 1], FLAG_BLOCK_Z, spawn);
+			}
+			int[] swap = frontier;
+			frontier = nextFrontier;
+			nextFrontier = swap;
+			count = nextCount;
+		}
+	}
+
+	private void visit(Level level, int[] data, int index, int boxDistance, byte axisFlag, boolean spawn) {
+		if (visited[index] == visitStamp) return;
+
+		// Any path through this block is too long to reach the section
+		if (step + boxDistance >= radius) {
+			visited[index] = visitStamp;
+			return;
+		}
+
+		byte flags = getFlags(index);
+		if (spawn && (flags & FLAG_TRANSFORMER) != 0) {
+			visited[index] = visitStamp;
+			spawnTransformedLight(level, index);
+			return;
+		}
+		if ((flags & FLAG_SOURCE) != 0) {
+			visited[index] = visitStamp;
+			return;
+		}
+		// Blocked only along this axis, can still be entered from other sides
+		if ((flags & axisFlag) != 0) return;
+
+		visited[index] = visitStamp;
+		if (boxDistance == 0) write(data, index, stepValue);
+		nextFrontier[nextCount++] = index;
+	}
+
+	private void spawnTransformedLight(Level level, int index) {
+		int x = index / STEP_X;
+		int y = (index / STEP_Y) % SIZE;
+		int z = index % SIZE;
+		LightTransformer transformer = BlockLights.getTransformer(storage.getState(x, y, z));
+		if (transformer == null) return;
+		pos.set(storage.getOriginX() + x, storage.getOriginY() + y, storage.getOriginZ() + z);
+		int color = ColorMath.mulBlend(stepValue, transformer.getColor(level, pos));
+		addSeed(secondaryCache, secondaryGroups, radius - step, color, index);
+	}
+
+	private byte getFlags(int index) {
+		if (flagStamps[index] == flagStamp) return flagCache[index];
+
+		int x = index / STEP_X;
+		int y = (index / STEP_Y) % SIZE;
+		int z = index % SIZE;
+		BlockState state = storage.getState(x, y, z);
+		byte flags = 0;
+
+		if (!state.isAir()) {
+			if (BlockLights.getLight(state) != null) flags |= FLAG_SOURCE;
+			if (modify && BlockLights.getTransformer(state) != null) flags |= FLAG_TRANSFORMER;
+			pos.set(storage.getOriginX() + x, storage.getOriginY() + y, storage.getOriginZ() + z);
+			if (state.isSolidRender(storage, pos) || !state.propagatesSkylightDown(storage, pos)) {
+				if (isAxisSturdy(state, Direction.EAST)) flags |= FLAG_BLOCK_X;
+				if (isAxisSturdy(state, Direction.UP)) flags |= FLAG_BLOCK_Y;
+				if (isAxisSturdy(state, Direction.SOUTH)) flags |= FLAG_BLOCK_Z;
 			}
 		}
+
+		flagCache[index] = flags;
+		flagStamps[index] = flagStamp;
+		return flags;
 	}
-	
-	private void fillLight(Level level, int[] data, BlockPos pos, LightInfo info, BlockPos secMin, BlockPos secMax, boolean modify) {
-		maskGeneration++;
-		if (maskGeneration == Integer.MAX_VALUE) {
-			Arrays.fill(mask, 0);
-			maskGeneration = 1;
-		}
-		mask[getMaskIndex(MASK_OFFSET, MASK_OFFSET, MASK_OFFSET)] = maskGeneration;
-		
-		int color = info.getAdvanced(level, pos, (byte) 0);
-		setLight(data, pos, color, secMin, secMax, true);
-		
-		buffers.get(0).add(pos);
-		byte radius = (byte) info.getRadius();
-		byte bufferIndex = 0;
-		
-		for (byte i = 1; i < radius; i++) {
-			Set<BlockPos> starts = buffers.get(bufferIndex);
-			bufferIndex = (byte) ((bufferIndex + 1) & 1);
-			Set<BlockPos> ends = buffers.get(bufferIndex);
-			color = info.getAdvanced(level, pos, i);
-			
-			for (BlockPos start: starts) {
-				for (Direction offset: DIRECTIONS) {
-					byte maskX = (byte) (start.getX() - pos.getX() + offset.getStepX());
-					byte maskY = (byte) (start.getY() - pos.getY() + offset.getStepY());
-					byte maskZ = (byte) (start.getZ() - pos.getZ() + offset.getStepZ());
-					
-					if (maskX < -radius || maskY < -radius || maskZ < -radius || maskX > radius || maskY > radius || maskZ > radius) continue;
-					
-					maskX += MASK_OFFSET;
-					maskY += MASK_OFFSET;
-					maskZ += MASK_OFFSET;
-					
-					if (maskX < 0 || maskX >= 33 || maskY < 0 || maskY >= 33 || maskZ < 0 || maskZ >= 33) continue;
-					int maskIndex = getMaskIndex(maskX, maskY, maskZ);
-					if (mask[maskIndex] == maskGeneration) continue;
-					mask[maskIndex] = maskGeneration;
-					
-					BlockPos p = positions[maskIndex].set(start).move(offset);
-					BlockState state = storage.getBlockState(p);
-					
-					LightTransformer transformer = BlockLights.getTransformer(state);
-					if (modify && transformer != null) {
-						int mixedColor = ColorMath.mulBlend(color, transformer.getColor(level, p));
-						transformers.add(new TransformerInfo(new SimpleLight(mixedColor, radius - i, false), p.immutable()));
-						continue;
-					}
-					else if (BlockLights.getLight(state) != null) {
-						continue;
-					}
-					else if (blockFace(state, storage, p, offset) && blockLight(state, storage, p)) {
-						continue;
-					}
-					
-					setLight(data, p, color, secMin, secMax, true);
-					ends.add(p);
-				}
-			}
-			starts.clear();
-		}
-		
-		buffers.get(0).clear();
-		buffers.get(1).clear();
+
+	private boolean isAxisSturdy(BlockState state, Direction dir) {
+		return state.isFaceSturdy(storage, pos, dir) || state.isFaceSturdy(storage, pos, dir.getOpposite());
 	}
-	
-	private boolean blockFace(BlockState state, BlockGetter level, BlockPos pos, Direction dir) {
-		return state.isFaceSturdy(level, pos, dir) || state.isFaceSturdy(level, pos, dir.getOpposite());
+
+	private static void write(int[] data, int index, int color) {
+		int x = index / STEP_X - 16;
+		int y = (index / STEP_Y) % SIZE - 16;
+		int z = index % SIZE - 16;
+		if (((x | y | z) & ~15) != 0) return;
+		int i = x << 8 | y << 4 | z;
+		data[i] = ColorMath.maxBlend(data[i], color) | ColorMath.ALPHA;
 	}
-	
-	private boolean blockLight(BlockState state, BlockGetter level, BlockPos pos) {
-		return state.isSolidRender(level, pos) || !state.propagatesSkylightDown(level, pos);
-	}
-	
-	private static int getMaskIndex(byte x, byte y, byte z) {
-		return x * 1089 + y * 33 + z;
-	}
-	
-	private void setLight(int[] data, BlockPos pos, int light, BlockPos secMin, BlockPos secMax, boolean maxBlend) {
-		if (greaterThan(pos, secMin) && smallerThan(pos, secMax)) {
-			int index = (pos.getX() & 15) << 8 | (pos.getY() & 15) << 4 | (pos.getZ() & 15);
-			if (maxBlend) data[index] = ColorMath.maxBlend(data[index], light) | ColorMath.ALPHA;
-			else data[index] = ColorMath.mulBlend(data[index], light) | ColorMath.ALPHA;
-		}
-	}
-	
-	private boolean greaterThan(BlockPos a, BlockPos b) {
-		return a.getX() >= b.getX() && a.getY() >= b.getY() && a.getZ() >= b.getZ();
-	}
-	
-	private boolean smallerThan(BlockPos a, BlockPos b) {
-		return a.getX() < b.getX() && a.getY() < b.getY() && a.getZ() < b.getZ();
-	}
-	
+
 	static {
+		for (int i = 0; i < SIZE; i++) {
+			BOX_DISTANCE[i] = i < 16 ? 16 - i : i > 31 ? i - 31 : 0;
+		}
+
 		List<BlockPos> positions = new ArrayList<>(27);
-		
+
 		for (byte i = -1; i < 2; i++) {
 			for (byte j = -1; j < 2; j++) {
 				for (byte k = -1; k < 2; k++) {
@@ -291,27 +361,29 @@ public class LightPropagator {
 				}
 			}
 		}
-		
-		OFFSETS = positions
+
+		BlockPos[] offsets = positions
 			.stream()
 			.sorted(Comparator.comparingDouble(b -> b.distSqr(Vec3i.ZERO)))
 			.toList()
 			.toArray(new BlockPos[27]);
-		
+
 		OFFSET_BORDER_DELTAS = new int[27];
 		for (int i = 0; i < 27; i++) {
-			BlockPos offset = OFFSETS[i];
+			BlockPos offset = offsets[i];
 			OFFSET_BORDER_DELTAS[i] = offset.getX() * 324 + offset.getY() * 18 + offset.getZ();
 		}
 	}
-	
-	private class TransformerInfo {
-		final LightInfo light;
-		final BlockPos pos;
-		
-		private TransformerInfo(LightInfo light, BlockPos pos) {
-			this.light = light;
-			this.pos = pos;
+
+	private static final class LightGroup {
+		final IntArrayList seeds = new IntArrayList();
+		final int radius;
+		final int color;
+		int computeId;
+
+		LightGroup(int radius, int color) {
+			this.radius = radius;
+			this.color = color;
 		}
 	}
 }

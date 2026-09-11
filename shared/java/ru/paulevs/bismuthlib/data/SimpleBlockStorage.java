@@ -1,108 +1,122 @@
 package ru.paulevs.bismuthlib.data;
 
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.BlockPos.MutableBlockPos;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.material.FluidState;
 import org.jetbrains.annotations.Nullable;
 
+/**
+ * Read-only view of the 48x48x48 block window (3x3x3 sections) around a section.
+ * Blocks are read straight from chunk section palettes, nothing is copied.
+ */
 public class SimpleBlockStorage implements BlockGetter {
+	public static final int SIZE = 48;
 	private static final BlockState AIR = Blocks.AIR.defaultBlockState();
-	private MutableBlockPos pos = new MutableBlockPos();
-	private BlockState[] storage = new BlockState[110592];
-	
-	public void fill(Level level, int x1, int y1, int z1) {
-		int index = 0;
-		for (byte dx = 0; dx < 48; dx++) {
-			pos.setX(x1 + dx);
-			for (byte dy = 0; dy < 48; dy++) {
-				pos.setY(y1 + dy);
-				for (byte dz = 0; dz < 48; dz++) {
-					pos.setZ(z1 + dz);
-					storage[index++] = level.getBlockState(pos);
-				}
-			}
-		}
-		pos.set(x1, y1, z1);
-	}
-	
-	public void fillFromSections(Level level, int secX, int secY, int secZ) {
-		LevelChunkSection[] chunkSections = null;
-		int lastCx = Integer.MIN_VALUE;
-		int lastCz = Integer.MIN_VALUE;
-		for (int sx = -1; sx <= 1; sx++) {
-			int cx = secX + sx;
-			int storageXBase = (sx + 1) << 4;
-			for (int sz = -1; sz <= 1; sz++) {
-				int cz = secZ + sz;
-				if (cx != lastCx || cz != lastCz) {
-					LevelChunk chunk = level.getChunk(cx, cz);
-					chunkSections = chunk == null ? null : chunk.getSections();
-					lastCx = cx;
-					lastCz = cz;
-				}
-				if (chunkSections == null) continue;
-				int storageZBase = (sz + 1) << 4;
-				for (int sy = -1; sy <= 1; sy++) {
-					int cy = secY + sy;
-					int sectionIndex = cy - level.getMinSection();
-					if (sectionIndex < 0 || sectionIndex >= chunkSections.length) continue;
-					LevelChunkSection section = chunkSections[sectionIndex];
-					if (section == null) continue;
-					int storageYBase = (sy + 1) << 4;
-					for (int lx = 0; lx < 16; lx++) {
-						int xIdx = (storageXBase + lx) * 2304;
-						for (int ly = 0; ly < 16; ly++) {
-							int xyIdx = xIdx + (storageYBase + ly) * 48;
-							for (int lz = 0; lz < 16; lz++) {
-								storage[xyIdx + storageZBase + lz] = section.getBlockState(lx, ly, lz);
-							}
-						}
+
+	private final LevelChunkSection[] sections = new LevelChunkSection[27];
+	private int minBuildHeight;
+	private int height;
+	private int originX;
+	private int originY;
+	private int originZ;
+
+	/**
+	 * Loads sections around the section. Missing chunks and air-only sections are treated as air.
+	 * @return false if the chunk of the center section is not loaded
+	 */
+	public boolean load(Level level, int secX, int secY, int secZ) {
+		originX = (secX - 1) << 4;
+		originY = (secY - 1) << 4;
+		originZ = (secZ - 1) << 4;
+		minBuildHeight = level.getMinBuildHeight();
+		height = level.getHeight();
+
+		int minSection = level.getMinSection();
+		ChunkSource source = level.getChunkSource();
+		boolean centerLoaded = false;
+
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				LevelChunk chunk = source.getChunkNow(secX + dx, secZ + dz);
+				LevelChunkSection[] chunkSections = chunk == null ? null : chunk.getSections();
+				if (dx == 0 && dz == 0) centerLoaded = chunkSections != null;
+				for (int dy = -1; dy <= 1; dy++) {
+					LevelChunkSection section = null;
+					int sectionIndex = secY + dy - minSection;
+					if (chunkSections != null && sectionIndex >= 0 && sectionIndex < chunkSections.length) {
+						section = chunkSections[sectionIndex];
+						if (section != null && section.hasOnlyAir()) section = null;
 					}
+					sections[(dx + 1) * 9 + (dy + 1) * 3 + dz + 1] = section;
 				}
 			}
 		}
-		pos.set(secX << 4, secY << 4, secZ << 4);
-		pos.move(-16, -16, -16);
+
+		return centerLoaded;
 	}
-	
-	private int getIndex(int x, int y, int z) {
-		return  x * 2304 + y * 48 + z;
+
+	/**
+	 * @param index (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)
+	 */
+	@Nullable
+	public LevelChunkSection getSection(int index) {
+		return sections[index];
 	}
-	
+
+	/**
+	 * Get block state using window coordinates (0-47).
+	 */
+	public BlockState getState(int x, int y, int z) {
+		LevelChunkSection section = sections[(x >> 4) * 9 + (y >> 4) * 3 + (z >> 4)];
+		return section == null ? AIR : section.getBlockState(x & 15, y & 15, z & 15);
+	}
+
+	public int getOriginX() {
+		return originX;
+	}
+
+	public int getOriginY() {
+		return originY;
+	}
+
+	public int getOriginZ() {
+		return originZ;
+	}
+
 	@Nullable
 	@Override
 	public BlockEntity getBlockEntity(BlockPos blockPos) {
 		return null;
 	}
-	
+
 	@Override
 	public BlockState getBlockState(BlockPos blockPos) {
-		int px = blockPos.getX() - pos.getX();
-		int py = blockPos.getY() - pos.getY();
-		int pz = blockPos.getZ() - pos.getZ();
-		if (px < 0 || px > 47 || py < 0 || py > 47 || pz < 0 || pz > 47) return AIR;
-		return storage[getIndex(px, py, pz)];
+		int x = blockPos.getX() - originX;
+		int y = blockPos.getY() - originY;
+		int z = blockPos.getZ() - originZ;
+		if (x < 0 || x >= SIZE || y < 0 || y >= SIZE || z < 0 || z >= SIZE) return AIR;
+		return getState(x, y, z);
 	}
-	
+
 	@Override
 	public FluidState getFluidState(BlockPos blockPos) {
-		return null;
+		return getBlockState(blockPos).getFluidState();
 	}
-	
+
 	@Override
 	public int getHeight() {
-		return 0;
+		return height;
 	}
-	
+
 	@Override
 	public int getMinBuildHeight() {
-		return 0;
+		return minBuildHeight;
 	}
 }

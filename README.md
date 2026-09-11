@@ -5,6 +5,71 @@ and calculate color for blocks that don't have json-specified colors.
 
 <br/>
 
+## Fast light update (1.20.0 - 1.20.6)
+This version reworks the light engine so colored light loads almost instantly, reaches 32 chunks
+and handles huge amounts of light sources (lava lakes, nether oceans).
+
+What changed:
+- **Grouped light propagation** - lights with the same color and radius are flooded together, so a lava lake
+costs about as much as a single torch. Sections without light sources nearby are skipped using the chunk palette.
+- **Smarter updates** - light is recalculated only when a chunk loads/unloads or a block changes, nearest sections
+first. Previously every chunk re-render queued 27 sections in random order.
+- **Sparse light texture** - only sections that contain light use GPU memory, which makes a 32 chunk radius possible
+(the old dense texture would need about 1 GB).
+- XZ radius slider goes up to 32 (old configs are moved to 32 automatically), Y radius defaults to 3,
+worker threads default to CPU cores - 2.
+
+### Test results
+Automated in-game tests in the development environment: superflat world with a lava surface everywhere, night,
+render distance 32, vsync off. The player waits while chunks load, then flies across the lava at 40 blocks/s.
+
+Original vs this version on 1.20.1:
+
+| | Original (16 chunk radius) | This version (32 chunk radius) |
+|---|---|---|
+| All visible light calculated | never caught up (72k sections queued after 9 s) | 6.5 s, as fast as chunks arrive |
+| FPS standing still | ~310-360 | ~350-415 |
+| Lowest FPS flying at 40 blocks/s | 133 | 233 |
+| GPU memory for light | 256 MB | 129 MB |
+
+This version on every Minecraft version (same test):
+
+| Minecraft | All 7170 lava sections lit | FPS standing still | Lowest FPS flying at 40 blocks/s | GPU memory for light |
+|---|---|---|---|---|
+| 1.20   | 6.9 s | 351-409 | 205 | 129 MB |
+| 1.20.1 | 6.9 s | 357-403 | 212 | 129 MB |
+| 1.20.2 | 7.8 s | 415-470 | 267 | 129 MB |
+| 1.20.3 | 7.0 s | 368-415 | 288 | 129 MB |
+| 1.20.4 | 7.0 s | 361-469 | 257 | 129 MB |
+| 1.20.5 | 9.0 s | 327-400 | 292 | 129 MB |
+| 1.20.6 | 8.0 s | 456-506 | 352 | 129 MB |
+
+Light time is limited by how fast the world sends chunks: the light queue stayed near zero during the whole test.
+
+Lava world 6 seconds after joining (left: this version, right: original):
+<p>
+<img src="docs/images/lava_new_6s.jpg" width="49%"/>
+<img src="docs/images/lava_original_6s.jpg" width="49%"/>
+</p>
+
+After flying across the lava at 40 blocks/s (left: this version, right: original):
+<p>
+<img src="docs/images/lava_new_flight.jpg" width="49%"/>
+<img src="docs/images/lava_original_flight.jpg" width="49%"/>
+</p>
+
+Color test on all versions (closed white room, one lit 4-candle stack per bay):
+
+![Color test on all versions](docs/images/color_test_all_versions.png)
+
+Light test on all versions (lights placed next to the player, teleport onto a lava field):
+
+![Light test on all versions](docs/images/light_test_all_versions.jpg)
+
+The white square in 1.20.5 and 1.20.6 screenshots is a debug overlay that is drawn only in the development environment.
+
+<br/>
+
 ### How to add light to blocks:
 BismuthLib use resourcepacks to add color light to blocks. You can add custom
 blocks from both mod resources and simple resourcepack.

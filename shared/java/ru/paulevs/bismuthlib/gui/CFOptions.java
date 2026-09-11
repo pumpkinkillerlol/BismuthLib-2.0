@@ -18,8 +18,10 @@ import java.util.Locale;
 public class CFOptions {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final File FILE = new File(FabricLoader.getInstance().getConfigDir().toString(), "bismuthlib.json");
+	private static final int CONFIG_VERSION = 2;
+	private static final int MAX_RADIUS_XZ = 32;
 	private static JsonObject config;
-	
+
 	static {
 		if (FILE.exists()) {
 			try {
@@ -35,22 +37,31 @@ public class CFOptions {
 		else {
 			config = new JsonObject();
 		}
+		if (config == null) {
+			config = new JsonObject();
+		}
+
+		// Old versions were limited to 16 sections, move old configs to the new 32 chunks default
+		if (getInt("configVersion", 1) < CONFIG_VERSION) {
+			setInt("mapRadiusXZ", MAX_RADIUS_XZ);
+			setInt("configVersion", CONFIG_VERSION);
+		}
 	}
-	
-	private static int mapRadiusXZ = getInt("mapRadiusXZ", 2);
-	private static int mapRadiusY = getInt("mapRadiusY", 2);
+
+	private static int mapRadiusXZ = getInt("mapRadiusXZ", MAX_RADIUS_XZ);
+	private static int mapRadiusY = getInt("mapRadiusY", 3);
 	private static boolean fastLight = getBool("fastLight", false);
-	private static int threads = getInt("threads", 4);
+	private static int threads = getInt("threads", Math.max(2, Math.min(16, Runtime.getRuntime().availableProcessors() - 2)));
 	private static boolean modifyColor = getBool("modifyColor", false);
 	private static int brightness = getInt("brightness", 64);
 	private static float floatBrightness = brightness / 64F;
 	private static boolean brightSources = getBool("brightSources", false);
-	
+
 	public static final OptionInstance<Integer> MAP_RADIUS_XZ = new OptionInstance<>(
 		"bismuthlib.options.mapRadiusXZ",
 		OptionInstance.noTooltip(),
 		(component, integer) -> Options.genericValueLabel(component, Component.literal(String.valueOf(integer * 2 + 1))),
-		new OptionInstance.IntRange(1, 16),
+		new OptionInstance.IntRange(1, MAX_RADIUS_XZ),
 		mapRadiusXZ,
 		val -> {
 			setInt("mapRadiusXZ", val);
@@ -80,7 +91,7 @@ public class CFOptions {
 			floatBrightness = val / 64F;
 		}
 	);
-	
+
 	private static final OptionInstance<Boolean> FAST_LIGHT = new OptionInstance<>(
 		"bismuthlib.options.lightType",
 		OptionInstance.noTooltip(),
@@ -125,55 +136,55 @@ public class CFOptions {
 			brightSources = val;
 		}
 	);
-	
+
 	public static final OptionInstance[] OPTIONS = new OptionInstance[] {
 		FAST_LIGHT, THREADS, MODIFY_COLOR, BRIGHT_SOURCES
 	};
-	
+
 	public static int getMapRadiusXZ() {
 		return mapRadiusXZ * 2 + 1;
 	}
-	
+
 	public static int getMapRadiusY() {
 		return mapRadiusY * 2 + 1;
 	}
-	
+
 	public static boolean isFastLight() {
 		return fastLight;
 	}
-	
+
 	public static int getThreadCount() {
 		return threads;
 	}
-	
+
 	public static boolean modifyColor() {
 		return modifyColor;
 	}
-	
+
 	public static float getBrightness() {
 		return floatBrightness;
 	}
-	
+
 	public static boolean isBrightSources() {
 		return brightSources;
 	}
-	
+
 	private static int getInt(String name, int def) {
 		return config.has(name) ? config.get(name).getAsInt() : def;
 	}
-	
+
 	private static void setInt(String name, int val) {
 		config.add(name, new JsonPrimitive(val));
 	}
-	
+
 	private static boolean getBool(String name, boolean def) {
 		return config.has(name) ? config.get(name).getAsBoolean() : def;
 	}
-	
+
 	private static void setBool(String name, boolean val) {
 		config.add(name, new JsonPrimitive(val));
 	}
-	
+
 	public static void save() {
 		String line = GSON.toJson(config);
 		try {

@@ -6,7 +6,6 @@
 	"client": [
 		"TextureAtlasSpriteAccessor",
 		"LevelRendererMixin",
-		"RenderChunkMixin",
 		"MinecraftMixin",
 		"OptionsScreenMixin"
 	],
