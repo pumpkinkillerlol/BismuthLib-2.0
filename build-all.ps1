@@ -31,7 +31,7 @@ foreach ($p in $projects) {
 		exit $LASTEXITCODE
 	}
 
-	$jar = Get-ChildItem -Path "$root\$p\build\libs" -Filter "*-0.1.0.jar" |
+	$jar = Get-ChildItem -Path "$root\$p\build\libs" -Filter "*.jar" |
 		Where-Object { $_.Name -notlike "*-sources.jar" } |
 		Select-Object -First 1
 
