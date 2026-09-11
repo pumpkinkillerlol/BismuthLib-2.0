@@ -10,6 +10,8 @@ import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.shaders.Uniform;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.ColorProviderRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -19,7 +21,6 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.color.block.BlockColor;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.client.renderer.texture.SpriteContents;
 import net.minecraft.client.resources.model.BakedModel;
@@ -58,17 +59,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BismuthLibClient implements ClientModInitializer {
 	public static final String MOD_ID = "bismuthlib";
-	
-	private static final ResourceLocation LIGHTMAP_ID = new ResourceLocation(MOD_ID, "colored_light");
+
 	private static LevelShaderData data;
-	
+
 	//private static GPULightPropagator gpuLight;
 	private static final Gson GSON = new GsonBuilder().create();
 	private static ResourceManager managerCache;
 	private static boolean fastLight = false;
 	private static boolean modifyLight = false;
 	private static boolean brightSources = false;
-	
+
 	@Override
 	public void onInitializeClient() {
 		if (FabricLoader.getInstance().isDevelopmentEnvironment()) {
@@ -76,18 +76,29 @@ public class BismuthLibClient implements ClientModInitializer {
 				drawContext.fill(1, 1, 100, 100, 0xFFFFFFFF);
 			});
 		}
-		
+
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			PrintCommand.register(dispatcher);
 		});
-		
+
+		// Light is recomputed only when it can change: chunks appear/disappear or blocks change (LevelRendererMixin)
+		ClientChunkEvents.CHUNK_LOAD.register((level, chunk) -> {
+			if (data != null) data.onChunkLoad(level, chunk);
+		});
+		ClientChunkEvents.CHUNK_UNLOAD.register((level, chunk) -> {
+			if (data != null) data.onChunkUnload(level, chunk);
+		});
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			if (client.level == null && data != null) data.clearLevel();
+		});
+
 		final ResourceLocation location = new ResourceLocation(MOD_ID, "resource_reloader");
 		ResourceManagerHelper.get(PackType.CLIENT_RESOURCES).registerReloadListener(new SimpleSynchronousResourceReloadListener() {
 			@Override
 			public ResourceLocation getFabricId() {
 				return location;
 			}
-			
+
 			@Override
 			public void onResourceManagerReload(ResourceManager resourceManager) {
 				managerCache = resourceManager;
@@ -95,20 +106,20 @@ public class BismuthLibClient implements ClientModInitializer {
 			}
 		});
 	}
-	
+
 	private static void loadBlocks(ResourceManager resourceManager) {
 		Set<Block> exclude = new HashSet<>();
-		
+
 		Map<ResourceLocation, Resource> list = resourceManager.listResources("lights", resourceLocation ->
 			resourceLocation.getPath().endsWith(".json") && resourceLocation.getNamespace().equals(MOD_ID)
 		);
-		
+
 		BlockLights.clear();
 		Map<BlockState, Integer> colorMap = new HashMap<>();
 		Map<BlockState, Integer> radiusMap = new HashMap<>();
 		list.forEach((id, resource) -> {
 			JsonObject obj = new JsonObject();
-			
+
 			try {
 				BufferedReader reader = resource.openAsReader();
 				obj = GSON.fromJson(reader, JsonObject.class);
@@ -117,7 +128,7 @@ public class BismuthLibClient implements ClientModInitializer {
 			catch (IOException e) {
 				e.printStackTrace();
 			}
-			
+
 			final JsonObject storage = obj;
 			storage.keySet().forEach(key -> {
 				ResourceLocation blockID = new ResourceLocation(key);
@@ -126,7 +137,7 @@ public class BismuthLibClient implements ClientModInitializer {
 					Block block = optional.get();
 					ImmutableList<BlockState> blockStates = block.getStateDefinition().getPossibleStates();
 					exclude.add(block);
-					
+
 					JsonObject data = storage.getAsJsonObject(key);
 					if (data.keySet().isEmpty()) {
 						BlockLights.addLight(block, null);
@@ -136,7 +147,7 @@ public class BismuthLibClient implements ClientModInitializer {
 						colorMap.clear();
 						BlockColor provider = null;
 						int providerIndex = 0;
-						
+
 						JsonElement element = data.get("color");
 						if (element == null) throw new RuntimeException("Block " + blockID + " in " + id + " missing color element!");
 						if (element.isJsonPrimitive()) {
@@ -156,7 +167,7 @@ public class BismuthLibClient implements ClientModInitializer {
 								colorMap.put(state, value);
 							});
 						}
-						
+
 						element = data.get("radius");
 						if (element == null) throw new RuntimeException("Block " + blockID + " in " + id + " missing radius element!");
 						if (element.isJsonPrimitive()) {
@@ -167,7 +178,7 @@ public class BismuthLibClient implements ClientModInitializer {
 							Map<BlockState, JsonPrimitive> values = getValues(block, element.getAsJsonObject());
 							values.forEach((state, primitive) -> radiusMap.put(state, primitive.getAsInt()));
 						}
-						
+
 						final int indexCopy = providerIndex;
 						final BlockColor colorCopy = provider;
 						blockStates.forEach(state -> {
@@ -186,7 +197,7 @@ public class BismuthLibClient implements ClientModInitializer {
 				}
 			});
 		});
-		
+
 		BuiltInRegistries.BLOCK.stream().filter(block -> !exclude.contains(block)).forEach(block -> {
 			block.getStateDefinition().getPossibleStates().stream().filter(state -> state.getLightEmission() > 0).forEach(state -> {
 				int color = getBlockColor(state);
@@ -194,15 +205,15 @@ public class BismuthLibClient implements ClientModInitializer {
 				BlockLights.addLight(state, new SimpleLight(color, radius));
 			});
 		});
-		
+
 		list = resourceManager.listResources("transformers", resourceLocation ->
 			resourceLocation.getPath().endsWith(".json") && resourceLocation.getNamespace().equals(MOD_ID)
 		);
-		
+
 		float[] hsv = new float[3];
 		list.forEach((id, resource) -> {
 			JsonObject obj = new JsonObject();
-			
+
 			try {
 				BufferedReader reader = resource.openAsReader();
 				obj = GSON.fromJson(reader, JsonObject.class);
@@ -211,7 +222,7 @@ public class BismuthLibClient implements ClientModInitializer {
 			catch (IOException e) {
 				e.printStackTrace();
 			}
-			
+
 			final JsonObject storage = obj;
 			storage.keySet().forEach(key -> {
 				ResourceLocation blockID = new ResourceLocation(key);
@@ -220,7 +231,7 @@ public class BismuthLibClient implements ClientModInitializer {
 					Block block = optional.get();
 					ImmutableList<BlockState> blockStates = block.getStateDefinition().getPossibleStates();
 					exclude.add(block);
-					
+
 					JsonObject data = storage.getAsJsonObject(key);
 					if (data.keySet().isEmpty()) {
 						BlockLights.addLight(block, null);
@@ -229,7 +240,7 @@ public class BismuthLibClient implements ClientModInitializer {
 						colorMap.clear();
 						BlockColor provider = null;
 						int providerIndex = 0;
-						
+
 						JsonElement element = data.get("color");
 						if (element == null) throw new RuntimeException("Block " + blockID + " in " + id + " missing color element!");
 						if (element.isJsonPrimitive()) {
@@ -258,7 +269,7 @@ public class BismuthLibClient implements ClientModInitializer {
 								colorMap.put(state, value);
 							});
 						}
-						
+
 						final int indexCopy = providerIndex;
 						final BlockColor colorCopy = provider;
 						blockStates.forEach(state -> {
@@ -273,8 +284,11 @@ public class BismuthLibClient implements ClientModInitializer {
 				}
 			});
 		});
+
+		// Light sources changed, recompute visible light
+		if (data != null) data.resetAll();
 	}
-	
+
 	private static Map<BlockState, JsonPrimitive> getValues(Block block, final JsonObject values) {
 		ImmutableList<BlockState> states = block.getStateDefinition().getPossibleStates();
 		Map<BlockState, JsonPrimitive> result = new HashMap<>();
@@ -299,7 +313,7 @@ public class BismuthLibClient implements ClientModInitializer {
 		});
 		return result;
 	}
-	
+
 	private static boolean hasPropertyWithValue(BlockState state, String propertyName, String propertyValue) {
 		Collection<Property<?>> properties = state.getProperties();
 		Iterator<Property<?>> iterator = properties.iterator();
@@ -313,25 +327,20 @@ public class BismuthLibClient implements ClientModInitializer {
 		}
 		return result;
 	}
-	
+
 	public static void initData() {
 		int w = CFOptions.getMapRadiusXZ();
 		int h = CFOptions.getMapRadiusY();
 		int count = CFOptions.getThreadCount();
-		
+
 		if (data == null) {
 			data = new LevelShaderData(w, h, count);
-			//gpuLight = new GPULightPropagator(w, h);
-			Minecraft.getInstance().getTextureManager().register(LIGHTMAP_ID, data.getTexture());
 		}
 		else if (data.getDataWidth() != w || data.getDataHeight() != h || count != data.getThreadCount()) {
 			data.dispose();
 			data = new LevelShaderData(w, h, count);
-			//gpuLight.dispose();
-			//gpuLight = new GPULightPropagator(w, h);
-			Minecraft.getInstance().getTextureManager().register(LIGHTMAP_ID, data.getTexture());
 		}
-		
+
 		boolean fast = CFOptions.isFastLight();
 		boolean modify = CFOptions.modifyColor();
 		boolean bright = CFOptions.isBrightSources();
@@ -341,44 +350,52 @@ public class BismuthLibClient implements ClientModInitializer {
 			}
 			fastLight = fast;
 			modifyLight = modify;
+			brightSources = bright;
 			data.resetAll();
 		}
 	}
-	
+
 	public static void update(Level level, int cx, int cy, int cz) {
 		data.update(level, cx, cy, cz);
-		//gpuLight.render();
 	}
-	
+
 	public static void updateSection(int cx, int cy, int cz) {
-		data.markToUpdate(cx, cy, cz);
+		data.markSection(cx, cy, cz);
 	}
-	
+
+	public static void onBlockChanged(BlockPos pos) {
+		if (data == null) return;
+		data.markBlock(pos, CFOptions.isFastLight() ? 1 : BlockLights.getMaxReach());
+	}
+
 	public static void bindWithUniforms() {
-		RenderSystem.setShaderTexture(7, LIGHTMAP_ID);
+		int textureId = data.getTextureId();
+		RenderSystem.setShaderTexture(7, textureId);
 		ShaderInstance shader = RenderSystem.getShader();
-		
+		// Samplers are copied from RenderSystem before this point, set it directly so a regrown light texture is used immediately
+		shader.setSampler("Sampler7", textureId);
+
 		Uniform uniform = shader.getUniform("playerSectionPos");
 		if (uniform != null) {
-			BlockPos center = data.getCenter();
-			uniform.set(center.getX(), center.getY(), center.getZ());
+			uniform.set(data.getCenterX(), data.getCenterY(), data.getCenterZ());
 		}
-		
+
 		uniform = shader.getUniform("dataScale");
 		if (uniform != null) {
 			uniform.set(data.getDataWidth(), data.getDataHeight());
 		}
-		
+
+		// Row where light atlas slots start (see LightAtlas)
 		uniform = shader.getUniform("dataSide");
 		if (uniform != null) {
-			uniform.set(data.getDataSide());
+			uniform.set(data.getSlotBase());
 		}
-		
+
 		uniform = shader.getUniform("fastLight");
 		if (uniform != null) {
 			uniform.set(fastLight ? 1 : 0);
 		}
-		
+
 		ClientLevel level = Minecraft.getInstance().level;
 		if (level != null) {
 			uniform = shader.getUniform("timeOfDay");
@@ -386,13 +403,13 @@ public class BismuthLibClient implements ClientModInitializer {
 				uniform.set(level.getTimeOfDay(0));
 			}
 		}
-		
+
 		uniform = shader.getUniform("lightsBrightness");
 		if (uniform != null) {
 			uniform.set(CFOptions.getBrightness());
 		}
 	}
-	
+
 	private static int getBlockColor(BlockState state) {
 		BakedModel model = Minecraft.getInstance().getBlockRenderer().getBlockModel(state);
 		if (model != null) {
@@ -407,7 +424,7 @@ public class BismuthLibClient implements ClientModInitializer {
 		}
 		return 0xFFFFFF;
 	}
-	
+
 	private static int getAverageBright(NativeImage img) {
 		long cr = 0;
 		long cg = 0;
